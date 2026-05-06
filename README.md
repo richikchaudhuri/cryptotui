@@ -11,8 +11,8 @@ network layer and UI follow.
 
 - [x] Generic ring buffer
 - [x] Wilder's RSI
-- [ ] Bollinger Bands
-- [ ] `Indicator` trait + registry
+- [x] Bollinger Bands
+- [x] `Indicator` trait + registry
 - [ ] Binance WebSocket pipeline
 - [ ] ratatui dashboard
 

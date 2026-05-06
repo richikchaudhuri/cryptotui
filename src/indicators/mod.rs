@@ -87,3 +87,10 @@ pub trait Indicator: Send + Sync {
     /// after this call.
     fn reset(&mut self);
 }
+
+/// Build the default set of indicators — Wilder's RSI (period 14) and
+/// Bollinger Bands (period 20, k = 2). The binary uses this as its
+/// starting registry before user-supplied configuration is wired in.
+pub fn default_indicators() -> Vec<Box<dyn Indicator>> {
+    vec![Box::new(Rsi::default()), Box::new(Bollinger::default())]
+}
