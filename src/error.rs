@@ -13,6 +13,22 @@ pub enum CryptoTuiError {
     /// (for example, a zero period or zero capacity).
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+
+    /// A configuration file could not be read, parsed, or validated.
+    /// The message describes the problem in user-facing terms; raw
+    /// secrets are never embedded.
+    #[error("config error: {0}")]
+    Config(String),
+
+    /// A WebSocket transport error: handshake failure, protocol error,
+    /// or unexpected disconnect.
+    #[error("websocket error: {0}")]
+    WebSocket(String),
+
+    /// A WebSocket message could not be parsed into a [`crate::ws::Tick`].
+    /// Malformed JSON, missing fields, or non-numeric price/quantity.
+    #[error("malformed exchange message: {0}")]
+    MalformedMessage(String),
 }
 
 /// Convenience alias for results returning [`CryptoTuiError`].
