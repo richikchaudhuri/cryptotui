@@ -10,9 +10,11 @@
 //! and TUI can dispatch over `Vec<Box<dyn Indicator>>` without caring
 //! which kind of indicator each entry is.
 
+pub mod bollinger;
 pub mod ring_buffer;
 pub mod rsi;
 
+pub use bollinger::Bollinger;
 pub use ring_buffer::RingBuffer;
 pub use rsi::Rsi;
 
