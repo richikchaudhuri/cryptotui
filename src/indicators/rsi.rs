@@ -157,6 +157,20 @@ fn rsi_from(avg_gain: f64, avg_loss: f64) -> f64 {
     }
 }
 
+impl super::Indicator for Rsi {
+    fn name(&self) -> &str {
+        "rsi"
+    }
+
+    fn update(&mut self, price: f64) -> Option<super::IndicatorValue> {
+        Rsi::update(self, price).map(super::IndicatorValue::Single)
+    }
+
+    fn reset(&mut self) {
+        Rsi::reset(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +312,21 @@ mod tests {
                 assert!((0.0..=100.0).contains(&v), "RSI {v} out of range");
             }
         }
+    }
+
+    #[test]
+    fn implements_indicator_trait() {
+        use crate::indicators::{Indicator, IndicatorValue};
+
+        let mut rsi: Box<dyn Indicator> = Box::new(Rsi::new(14).unwrap());
+        assert_eq!(rsi.name(), "rsi");
+
+        for i in 1..=14 {
+            assert_eq!(rsi.update(i as f64), None, "tick {i} via trait");
+        }
+        assert_eq!(rsi.update(15.0), Some(IndicatorValue::Single(100.0)));
+
+        rsi.reset();
+        assert_eq!(rsi.update(1.0), None, "post-reset trait dispatch");
     }
 }
