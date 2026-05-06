@@ -2,7 +2,9 @@
 
 A terminal dashboard for crypto prices. Streams trades from Binance over
 WebSocket, runs them through hand-rolled streaming indicators (RSI,
-Bollinger Bands), and will eventually draw a live ratatui chart.
+Bollinger Bands), and renders a live ratatui chart with a colour
+palette stolen from a private banker's office (cream, brushed gold,
+oxblood — restrained, opinionated, mine).
 
 ## Status
 
@@ -11,7 +13,8 @@ Bollinger Bands), and will eventually draw a live ratatui chart.
 - [x] Bollinger Bands
 - [x] `Indicator` trait + registry — adding a new indicator is one file
 - [x] Binance WebSocket pipeline with exponential-backoff reconnects
-- [ ] ratatui dashboard (next)
+- [x] ratatui dashboard with live chart, RSI gauge, Bollinger panel,
+      help overlay
 
 ## Run it
 
@@ -19,9 +22,46 @@ Bollinger Bands), and will eventually draw a live ratatui chart.
 cargo run --release
 ```
 
-By default it streams `btcusdt` trades from Binance and prints a line
-per tick with the live indicator readings. The streaming endpoints are
-public, so no API keys needed.
+Takes over your terminal, connects to Binance, and shows live
+`btcusdt` trades. The streaming endpoints are public, so no API key
+needed. Press `q` (or `esc`) to quit.
+
+```
+─ CRYPTOTUI · BTCUSDT ──────────────────────── ● live · vol. 01 ─
+
+  $ 67,250.42                       ▲ +0.47 %        1,247 trades
+
+  ╭─────────────────────────────────────────────────────────────╮
+  │           [price line + Bollinger upper/mid/lower]          │
+  ╰─────────────────────────────────────────────────────────────╯
+
+  ─ RSI · 14 ────────────────────────────────────────────────────
+    ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱  68.03            NEUTRAL
+
+  ─ BOLLINGER · 20 / 2σ ─────────────────────────────────────────
+    ⌃  upper     67,300.00
+    ·  middle    67,200.00
+    ⌄  lower     67,100.00
+
+──────────────── q quit · ? help · i focus ──── © MMXXVI ───────
+```
+
+### Keybindings
+
+| Key       | Action                                      |
+|-----------|---------------------------------------------|
+| `q` / `esc` | quit                                       |
+| `?` / `h` | toggle help overlay                          |
+| `s`       | switch symbol (BTC, ETH, SOL, ..., PAX Gold) |
+| `i`       | cycle indicator focus (both / RSI / Bollinger) |
+| `ctrl-c`  | hard interrupt                               |
+
+Inside the symbol picker: `↑/↓` (or `j/k`) to navigate, `enter` to
+switch, `esc` to cancel. The presets cover the top crypto pairs plus
+two tokenised gold pairs (PAXG, XAUT) — those are the closest thing
+Binance offers to a real gold price.
+
+### Configuration
 
 Want a different pair or different periods? Drop a TOML file at
 `~/.config/cryptotui/config.toml`:
@@ -54,9 +94,12 @@ first N changes, then recursive smoothing takes over. Flat prices give
 never get a `0/0` `NaN` in your face.
 
 **The socket reconnects itself.** If Binance drops the connection the
-worker backs off (250 ms doubling up to 30 s) and tries again. The rest
-of the app doesn't notice except for a status update on the side
-channel.
+worker backs off (250 ms doubling up to 30 s) and tries again. The
+dashboard side just sees the masthead status pip change colour.
+
+**The TUI lifecycle is panic-safe.** A panic anywhere in the program
+restores cooked mode and leaves the alternate screen before printing
+the payload, so you never end up in a wedged terminal.
 
 **No `.unwrap()` in library code.** Enforced via
 `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`.
@@ -68,8 +111,9 @@ Tests stay readable.
 src/
   indicators/   ring buffer, RSI, Bollinger, the Indicator trait
   ws/           Binance WebSocket worker, parsed Tick events
+  tui/          theme, dashboard, chart, help overlay
   config.rs     TOML config loader, .env handling
-  app.rs        state, tick ingestion, the streaming pipeline
+  app.rs        state, tick ingestion, helper readouts
   main.rs       entry point
 tests/          integration tests + on-disk Binance fixtures
 ```
@@ -77,9 +121,10 @@ tests/          integration tests + on-disk Binance fixtures
 ## Tests
 
 ```sh
-cargo test
-cargo clippy -- -D warnings
-cargo fmt --check
+make test       # cargo test
+make lint       # cargo clippy -- -D warnings
+make fmt        # cargo fmt --check
+make run        # cargo run --release
 ```
 
 The live WebSocket isn't part of `cargo test` (it would be flaky and

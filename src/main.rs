@@ -1,32 +1,31 @@
-//! cryptotui binary entry point — Phase 1c streaming pipeline.
+//! cryptotui binary entry point.
 //!
-//! `cargo run` resolves configuration (TOML at `~/.config/cryptotui/config.toml`,
-//! falling back to defaults if absent), loads any `.env` secrets, and
-//! drives [`cryptotui::app::run_print_pipeline`] which streams trades
-//! from Binance and prints one summary line per tick to stdout. The
-//! ratatui dashboard takes over here in Phase 1d.
+//! Loads `~/.config/cryptotui/config.toml` (falling back to defaults if
+//! absent), reads any `.env` for secrets, then hands control to the
+//! ratatui dashboard at [`cryptotui::tui::run_tui_pipeline`]. Press
+//! `q`, `esc`, or Ctrl-C to exit.
 
 use anyhow::{Context, Result};
 
-use cryptotui::app::run_print_pipeline;
 use cryptotui::config::{load_dotenv, Config};
+use cryptotui::tui::run_tui_pipeline;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23 dropped the implicit default crypto provider; pick one
+    // here once for the whole process. `install_default` returns Err if a
+    // provider is already installed (for example, by a test harness), so
+    // it's safe to discard.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     load_dotenv().context("loading .env")?;
 
     let cfg_path = Config::default_path().context("locating config path")?;
     let config = Config::load(&cfg_path)
         .with_context(|| format!("loading config from {}", cfg_path.display()))?;
 
-    eprintln!(
-        "[cryptotui] streaming {symbol} (RSI period {rsi}, Bollinger {bp}/{bk})",
-        symbol = config.symbol,
-        rsi = config.indicators.rsi_period,
-        bp = config.indicators.bollinger_period,
-        bk = config.indicators.bollinger_k,
-    );
-
-    run_print_pipeline(config).await?;
+    run_tui_pipeline(config)
+        .await
+        .context("running tui pipeline")?;
     Ok(())
 }

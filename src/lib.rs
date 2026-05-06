@@ -22,4 +22,5 @@ pub mod app;
 pub mod config;
 pub mod error;
 pub mod indicators;
+pub mod tui;
 pub mod ws;

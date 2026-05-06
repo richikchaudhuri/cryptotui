@@ -29,6 +29,10 @@ pub enum CryptoTuiError {
     /// Malformed JSON, missing fields, or non-numeric price/quantity.
     #[error("malformed exchange message: {0}")]
     MalformedMessage(String),
+
+    /// Terminal setup, render, or teardown failed.
+    #[error("terminal error: {0}")]
+    Tui(String),
 }
 
 /// Convenience alias for results returning [`CryptoTuiError`].

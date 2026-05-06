@@ -2,33 +2,41 @@
 //!
 //! [`AppState`] owns the live data the rest of the binary cares about:
 //! a bounded ring of recent (timestamp, price) samples for the chart,
-//! the indicator instances, their most recent emitted readings, and the
-//! current WebSocket lifecycle. It is renderer-agnostic — Phase 1c
-//! prints a one-line summary per tick to stdout; Phase 1d will hand
-//! the same state to the ratatui dashboard.
+//! a parallel ring of Bollinger-band readings (so the chart can overlay
+//! the bands at each historical point), the indicator instances, their
+//! most recent emitted readings, and the current WebSocket lifecycle.
+//! It is renderer-agnostic — the [`crate::tui`] module is the only
+//! caller today, but a print-only pipeline could trivially reuse the
+//! same struct.
 
 use std::collections::VecDeque;
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::indicators::{Bollinger, Indicator, IndicatorValue, Rsi};
-use crate::ws::binance::{spawn_trade_stream, BinanceConfig};
+use crate::indicators::{Bands, Bollinger, Indicator, IndicatorValue, Rsi};
 use crate::ws::{Tick, WsStatus};
+
+/// Position of the RSI indicator inside [`AppState::indicators`].
+pub const RSI_INDEX: usize = 0;
+/// Position of the Bollinger indicator inside [`AppState::indicators`].
+pub const BOLLINGER_INDEX: usize = 1;
 
 /// Live application state.
 ///
 /// A bounded `VecDeque` retains the most recent ticks for the chart;
 /// older samples are evicted from the front as new ones arrive at the
-/// back. Indicator instances live in `indicators`; the latest non-`None`
-/// reading per indicator is cached in `last_readings` so the renderer
-/// can show a value even on warm-up ticks where this update returned
-/// `None`.
+/// back. [`Self::bollinger_history`] is kept in lock-step with
+/// [`Self::history`] so the chart can pair every price point with the
+/// band reading observed on the same tick (or `None` during warm-up).
 pub struct AppState {
     /// Resolved configuration the app was started with.
     pub config: Config,
     /// `(timestamp_ms, price)` samples in arrival order.
     /// The tail is the most recent; capacity is `config.history_capacity`.
     pub history: VecDeque<(u64, f64)>,
+    /// Bollinger reading observed on the same tick as the corresponding
+    /// entry of [`Self::history`]. Same length as `history` at all times.
+    pub bollinger_history: VecDeque<Option<Bands>>,
     /// Streaming indicators, in display order.
     pub indicators: Vec<Box<dyn Indicator>>,
     /// Latest non-`None` reading per indicator, parallel to
@@ -36,6 +44,11 @@ pub struct AppState {
     pub last_readings: Vec<Option<IndicatorValue>>,
     /// Most recent tick observed, if any.
     pub last_tick: Option<Tick>,
+    /// First price observed this session — anchor for the
+    /// since-start percentage shown in the masthead.
+    pub session_start_price: Option<f64>,
+    /// Total number of ticks ingested since process start.
+    pub tick_count: u64,
     /// Most recent WebSocket lifecycle event observed.
     pub status: WsStatus,
 }
@@ -59,9 +72,12 @@ impl AppState {
         Ok(Self {
             config,
             history: VecDeque::with_capacity(cap),
+            bollinger_history: VecDeque::with_capacity(cap),
             indicators,
             last_readings: vec![None; n],
             last_tick: None,
+            session_start_price: None,
+            tick_count: 0,
             status: WsStatus::Connecting,
         })
     }
@@ -71,19 +87,37 @@ impl AppState {
         self.indicators.len()
     }
 
-    /// Apply a tick: extend history, advance every indicator, refresh
-    /// `last_readings` (only on a non-`None` emit), and store
-    /// `last_tick`. O(N) where N is the number of indicators.
+    /// Apply a tick: extend the price + Bollinger histories, advance
+    /// every indicator, refresh `last_readings` (only on a non-`None`
+    /// emit), and store `last_tick`. O(N) where N is the number of
+    /// indicators.
     pub fn ingest_tick(&mut self, tick: Tick) {
         self.history.push_back((tick.timestamp_ms, tick.price));
         while self.history.len() > self.config.history_capacity {
             self.history.pop_front();
         }
+
+        let mut bb_this_tick: Option<Bands> = None;
         for (i, ind) in self.indicators.iter_mut().enumerate() {
-            if let Some(v) = ind.update(tick.price) {
+            let result = ind.update(tick.price);
+            if let Some(v) = result {
                 self.last_readings[i] = Some(v);
             }
+            if i == BOLLINGER_INDEX {
+                if let Some(IndicatorValue::Bands(b)) = result {
+                    bb_this_tick = Some(b);
+                }
+            }
         }
+        self.bollinger_history.push_back(bb_this_tick);
+        while self.bollinger_history.len() > self.config.history_capacity {
+            self.bollinger_history.pop_front();
+        }
+
+        if self.session_start_price.is_none() {
+            self.session_start_price = Some(tick.price);
+        }
+        self.tick_count = self.tick_count.saturating_add(1);
         self.last_tick = Some(tick);
     }
 
@@ -92,10 +126,36 @@ impl AppState {
         self.status = status;
     }
 
+    /// Percentage change between the most recent tick and the first
+    /// price observed this session. `None` until two ticks have arrived.
+    pub fn session_change_pct(&self) -> Option<f64> {
+        let start = self.session_start_price?;
+        let last = self.last_tick.as_ref()?.price;
+        if start == 0.0 {
+            return None;
+        }
+        Some((last - start) / start * 100.0)
+    }
+
+    /// Latest RSI reading, if past warm-up.
+    pub fn latest_rsi(&self) -> Option<f64> {
+        match self.last_readings.get(RSI_INDEX).copied().flatten()? {
+            IndicatorValue::Single(v) => Some(v),
+            IndicatorValue::Bands(_) => None,
+        }
+    }
+
+    /// Latest Bollinger reading, if past warm-up.
+    pub fn latest_bollinger(&self) -> Option<Bands> {
+        match self.last_readings.get(BOLLINGER_INDEX).copied().flatten()? {
+            IndicatorValue::Bands(b) => Some(b),
+            IndicatorValue::Single(_) => None,
+        }
+    }
+
     /// Format `last_readings[i]` as a short label like
-    /// `"rsi=68.03"` or `"bollinger=warm"`. Used by the Phase 1c
-    /// stdout demo and as a fallback in the Phase 1d indicator panel
-    /// for very narrow terminals.
+    /// `"rsi=68.03"` or `"bollinger=warm"`. Convenience used by tests
+    /// and any future text-only diagnostic surface.
     pub fn format_indicator(&self, i: usize) -> String {
         let name = self.indicators.get(i).map(|ind| ind.name()).unwrap_or("?");
         match self.last_readings.get(i).copied().flatten() {
@@ -104,78 +164,6 @@ impl AppState {
             Some(IndicatorValue::Bands(b)) => {
                 format!("{name}=[{:.4}, {:.4}, {:.4}]", b.lower, b.middle, b.upper)
             }
-        }
-    }
-}
-
-/// Run the Phase 1c streaming pipeline: connect to Binance, feed each
-/// tick into [`AppState`], and print a one-line summary per event to
-/// stdout. Returns when the process receives Ctrl+C or the WS worker
-/// permanently exits.
-///
-/// This is the "no TUI yet" entry point listed in Phase 1c. Phase 1d
-/// replaces it with [`crate::tui`]-driven rendering while reusing the
-/// same [`AppState`] and channel topology.
-pub async fn run_print_pipeline(config: Config) -> Result<()> {
-    let mut app = AppState::new(config)?;
-    let bin_cfg = BinanceConfig::new(&app.config.symbol)?;
-    let (handle, mut tick_rx, mut status_rx) = spawn_trade_stream(bin_cfg);
-
-    let mut interrupt = Box::pin(tokio::signal::ctrl_c());
-
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut interrupt => {
-                eprintln!("\n[cryptotui] interrupt received, shutting down");
-                break;
-            }
-            maybe_tick = tick_rx.recv() => match maybe_tick {
-                Some(tick) => {
-                    app.ingest_tick(tick);
-                    print_tick_line(&app);
-                }
-                None => break,
-            },
-            maybe_status = status_rx.recv() => match maybe_status {
-                Some(status) => {
-                    app.ingest_status(status.clone());
-                    print_status_line(&status);
-                }
-                None => break,
-            },
-        }
-    }
-
-    drop(tick_rx);
-    drop(status_rx);
-    let _ = handle.await;
-    Ok(())
-}
-
-fn print_tick_line(app: &AppState) {
-    if let Some(tick) = &app.last_tick {
-        let mut line = format!(
-            "{ts}  {sym} {price:.4}  qty={qty:.6}",
-            ts = tick.timestamp_ms,
-            sym = tick.symbol,
-            price = tick.price,
-            qty = tick.quantity,
-        );
-        for i in 0..app.indicator_count() {
-            line.push_str("  ");
-            line.push_str(&app.format_indicator(i));
-        }
-        println!("{line}");
-    }
-}
-
-fn print_status_line(status: &WsStatus) {
-    match status {
-        WsStatus::Connecting => eprintln!("[cryptotui] connecting…"),
-        WsStatus::Connected => eprintln!("[cryptotui] connected"),
-        WsStatus::Reconnecting { after_ms, attempt } => {
-            eprintln!("[cryptotui] reconnecting (attempt {attempt}) in {after_ms} ms");
         }
     }
 }
@@ -207,7 +195,10 @@ mod tests {
         let app = AppState::new(cfg).unwrap();
         assert_eq!(app.indicator_count(), 2);
         assert_eq!(app.history.len(), 0);
+        assert_eq!(app.bollinger_history.len(), 0);
         assert_eq!(app.last_readings, vec![None, None]);
+        assert_eq!(app.tick_count, 0);
+        assert!(app.session_start_price.is_none());
     }
 
     #[test]
@@ -219,6 +210,40 @@ mod tests {
         assert_eq!(app.history[0], (10, 100.0));
         assert_eq!(app.history[1], (11, 101.0));
         assert_eq!(app.last_tick.as_ref().unwrap().price, 101.0);
+        assert_eq!(app.tick_count, 2);
+        assert_eq!(app.session_start_price, Some(100.0));
+    }
+
+    #[test]
+    fn bollinger_history_aligned_with_price_history() {
+        let mut app = AppState::new(Config::default()).unwrap();
+        for i in 0..50 {
+            app.ingest_tick(sample_tick(100.0 + i as f64, i as u64));
+            assert_eq!(
+                app.history.len(),
+                app.bollinger_history.len(),
+                "histories must stay the same length tick by tick"
+            );
+        }
+    }
+
+    #[test]
+    fn bollinger_history_holds_none_during_warmup_then_some() {
+        let cfg = Config {
+            indicators: crate::config::IndicatorsConfig {
+                bollinger_period: 5,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut app = AppState::new(cfg).unwrap();
+        for i in 0..4 {
+            app.ingest_tick(sample_tick(100.0 + i as f64, i as u64));
+        }
+        assert!(app.bollinger_history.iter().all(|b| b.is_none()));
+        // Fifth tick fills the window — Bollinger emits its first reading.
+        app.ingest_tick(sample_tick(105.0, 4));
+        assert!(app.bollinger_history.back().unwrap().is_some());
     }
 
     #[test]
@@ -232,8 +257,39 @@ mod tests {
             app.ingest_tick(sample_tick(i as f64, i as u64));
         }
         assert_eq!(app.history.len(), 3);
+        assert_eq!(app.bollinger_history.len(), 3);
         let prices: Vec<f64> = app.history.iter().map(|(_, p)| *p).collect();
         assert_eq!(prices, vec![7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn session_change_pct_tracks_first_price() {
+        let mut app = AppState::new(Config::default()).unwrap();
+        assert!(app.session_change_pct().is_none());
+        app.ingest_tick(sample_tick(100.0, 1));
+        // Single tick: change is 0%, but session_start == last so it's defined.
+        assert_eq!(app.session_change_pct(), Some(0.0));
+        app.ingest_tick(sample_tick(110.0, 2));
+        let pct = app.session_change_pct().unwrap();
+        assert!((pct - 10.0).abs() < 1e-9, "expected 10%, got {pct}");
+    }
+
+    #[test]
+    fn latest_rsi_and_bollinger_helpers() {
+        let cfg = Config {
+            indicators: crate::config::IndicatorsConfig {
+                rsi_period: 3,
+                bollinger_period: 3,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut app = AppState::new(cfg).unwrap();
+        for (i, p) in [10.0, 11.0, 12.0, 13.0, 14.0].iter().enumerate() {
+            app.ingest_tick(sample_tick(*p, i as u64));
+        }
+        assert!(app.latest_rsi().is_some());
+        assert!(app.latest_bollinger().is_some());
     }
 
     #[test]
