@@ -4,10 +4,6 @@ A terminal dashboard for crypto prices. Streams trades from Binance over
 WebSocket, runs them through hand-rolled streaming indicators (RSI,
 Bollinger Bands), and will eventually draw a live ratatui chart.
 
-I built this to actually learn async Rust instead of just watching
-videos about it, and because alt-tabbing to TradingView every time I
-want to glance at BTC got old.
-
 ## Status
 
 - [x] Ring buffer with circular indexing
@@ -42,7 +38,7 @@ bollinger_k = 2.0
 
 Anything you leave out falls back to the default. If you ever do need
 authenticated Binance endpoints, copy `.env.example` to `.env` and fill
-in your keys — the `.env` is gitignored, secrets never make it into a
+in your keys, the `.env` is gitignored, secrets never make it into a
 commit or an error message.
 
 ## Why the design looks like it does
@@ -54,7 +50,7 @@ not the hot path — that's a Phase 2 thing.
 
 **Wilder's smoothing for RSI.** Two warm-up buffers fill during the
 first N changes, then recursive smoothing takes over. Flat prices give
-50, all gains give 100, all losses give 0 — handled explicitly so you
+50, all gains give 100, all losses give 0 which is handled explicitly so you
 never get a `0/0` `NaN` in your face.
 
 **The socket reconnects itself.** If Binance drops the connection the
@@ -92,6 +88,6 @@ need network). The parser is covered by fixture messages in
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
 
 By [Richik Chaudhuri](https://github.com/richikchaudhuri).
