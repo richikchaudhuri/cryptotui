@@ -18,5 +18,8 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![warn(missing_docs)]
 
+pub mod app;
+pub mod config;
 pub mod error;
 pub mod indicators;
+pub mod ws;
